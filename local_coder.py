@@ -176,6 +176,23 @@ def tool_remember(args: dict) -> str:
     return f"Saved to memory: {text}"
 
 
+def tool_read_pdf(args: dict) -> str:
+    """Extract text from a PDF file. Optional pages param like '1-5' or '3'."""
+    path = args.get("path")
+    pages = args.get("pages")
+    if not path:
+        return "ERROR: path required"
+    sys.path.insert(0, TOOLS_DIR)
+    try:
+        from pdf_tool import pdf_to_text  # type: ignore
+        text = pdf_to_text(path, pages=pages)
+        return text[:8000]  # cap to avoid context overflow
+    except ImportError:
+        return "ERROR: pdf_tool not available. Check TOOLS_DIR."
+    except Exception as e:
+        return f"read_pdf error: {e}"
+
+
 def tool_dev_server(args: dict) -> str:
     """Start or stop a React dev server using game-creation-agent tools."""
     action = args.get("action", "start")  # "start" or "stop"
@@ -253,6 +270,7 @@ TOOLS = {
     "dev_server":   tool_dev_server,
     "screenshot":   tool_screenshot,
     "ask_vision":   tool_ask_vision,
+    "read_pdf":     tool_read_pdf,
     "git":          tool_git,
     "remember":     tool_remember,
 }
@@ -277,6 +295,7 @@ Available tools:
 - dev_server(action, path?, port?)          — start or stop a React dev server (action: "start"|"stop")
 - screenshot(url?, output_path?, selector?) — take a screenshot of a running web app; returns image path
 - ask_vision(image_path, question)          — ask Claude to analyze a screenshot; returns text answer
+- read_pdf(path, pages?)                    — extract text from a PDF file (pages: "1-5" or "3")
 - git(subcommand, cwd?, args?)              — run git status/diff/log/add/commit
 - remember(text)                            — save a fact to long-term memory for future sessions
 
