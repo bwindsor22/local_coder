@@ -1,0 +1,5 @@
+claude_local_env/
+local_env/
+__pycache__/
+*.pyc
+.DS_Store
