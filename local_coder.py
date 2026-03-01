@@ -26,14 +26,20 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3-coder:30b"
 
 MAX_CONTEXT_CHARS = 120_000
-MAX_STEPS = 50
+MAX_STEPS = 80
 JSON_RETRY_LIMIT = 4   # max consecutive invalid-JSON responses before aborting
 
 # Path to the shared Python tools
 TOOLS_DIR = "/Users/brad/projects/code/game-creation-agent/tools"
 
-# Long-term memory file (persists across sessions)
-MEMORY_FILE = os.path.expanduser("~/.local_coder_memory.md")
+# Long-term memory: global fallback; project memory preferred when project_dir is set
+GLOBAL_MEMORY_FILE = os.path.expanduser("~/.local_coder_memory.md")
+
+def get_memory_file(project_dir: Optional[str] = None) -> str:
+    """Return the active memory file: project-scoped if available, else global."""
+    if project_dir:
+        return os.path.join(project_dir, ".local_coder_memory.md")
+    return GLOBAL_MEMORY_FILE
 
 
 # ============================================================
@@ -177,13 +183,14 @@ def tool_npm_build(args: dict) -> str:
 
 
 def tool_remember(args: dict) -> str:
-    """Append a fact to the long-term memory file (~/.local_coder_memory.md)."""
+    """Append a fact to the project memory file (or global if no project)."""
     text = args.get("text", "").strip()
     if not text:
         return "ERROR: 'text' argument required"
-    with open(MEMORY_FILE, "a", encoding="utf-8") as f:
+    mem_file = get_memory_file(args.get("_project_dir"))
+    with open(mem_file, "a", encoding="utf-8") as f:
         f.write(f"- {text}\n")
-    return f"Saved to memory: {text}"
+    return f"Saved to memory ({mem_file}): {text}"
 
 
 def tool_git(args: dict) -> str:
@@ -200,6 +207,26 @@ def tool_git(args: dict) -> str:
     return out[:3000] or "(empty output)"
 
 
+def tool_read_pdf(args: dict) -> str:
+    """Extract text from a PDF rulebook. pages: '1-5' or '3' (optional)."""
+    path = args.get("path")
+    pages = args.get("pages")
+    if not path:
+        return "ERROR: path required"
+    script = (
+        f"import sys; sys.path.insert(0, {repr(TOOLS_DIR)}); "
+        f"from pdf_tool import pdf_to_text; "
+        f"print(pdf_to_text({repr(path)}, pages={repr(pages)})[:8000])"
+    )
+    result = subprocess.run(
+        ["/usr/bin/python3", "-c", script],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        return f"read_pdf error: {result.stderr[:400]}"
+    return result.stdout.strip()
+
+
 TOOLS = {
     "read_file":    tool_read_file,
     "write_file":   tool_write_file,
@@ -208,6 +235,7 @@ TOOLS = {
     "search_files": tool_search_files,
     "npm_build":    tool_npm_build,
     "git":          tool_git,
+    "read_pdf":     tool_read_pdf,
     "remember":     tool_remember,
 }
 
@@ -229,6 +257,7 @@ Available tools:
 - search_files(pattern, path?, include?)    — grep for a pattern in files
 - npm_build(path)                           — build a React/npm project; returns BUILD SUCCESS or BUILD FAILED + errors
 - git(subcommand, cwd?, args?)              — run git status/diff/log/add/commit
+- read_pdf(path, pages?)                    — extract text from a PDF rulebook
 - remember(text)                            — save a fact to long-term memory for future sessions
 
 Rules:
@@ -261,7 +290,7 @@ def call_llm(prompt: str) -> str:
                 "model": MODEL,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": 0.1, "num_predict": 2048},
+                "options": {"temperature": 0.1, "num_predict": 4096},
             },
             timeout=300,
         )
@@ -369,16 +398,23 @@ Current goal: {parsed.get('current_goal', '')}
 # ============================================================
 
 def load_system_context(ctx: "Context", project_dir: Optional[str]):
-    """Load persistent context: long-term memory and project CLAUDE.md."""
-    if os.path.exists(MEMORY_FILE):
-        memory = read_file(MEMORY_FILE).strip()
-        if memory:
-            ctx.add("system", f"Long-term memory (facts from previous sessions):\n{memory}")
-
+    """Load persistent context: project memory, CLAUDE.md, then global memory."""
     if project_dir:
+        # Project-scoped memory takes precedence
+        proj_mem = os.path.join(project_dir, ".local_coder_memory.md")
+        if os.path.exists(proj_mem):
+            memory = read_file(proj_mem).strip()
+            if memory:
+                ctx.add("system", f"Project memory (facts about this project):\n{memory}")
         claude_md = os.path.join(project_dir, "CLAUDE.md")
         if os.path.exists(claude_md):
             ctx.add("system", f"Project instructions (CLAUDE.md):\n{read_file(claude_md)}")
+    else:
+        # No project: fall back to global memory
+        if os.path.exists(GLOBAL_MEMORY_FILE):
+            memory = read_file(GLOBAL_MEMORY_FILE).strip()
+            if memory:
+                ctx.add("system", f"Long-term memory:\n{memory}")
 
 
 def run_agent(user_input: str, project_dir: Optional[str] = None):
@@ -521,6 +557,9 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
 
         # ── All other tools ───────────────────────────────────────────────
         try:
+            # Inject project_dir so remember() knows where to write
+            if action == "remember":
+                arguments = {**arguments, "_project_dir": project_dir}
             result = TOOLS[action](arguments)
         except Exception as e:
             result = f"Tool error: {e}\n{traceback.format_exc()}"
@@ -568,14 +607,16 @@ def main():
             print("Or enter a coding task and the agent will work on it.")
             continue
         if user_input == "/memory":
-            if os.path.exists(MEMORY_FILE):
-                print(read_file(MEMORY_FILE) or "(memory file is empty)")
+            mem = get_memory_file(args.project)
+            if os.path.exists(mem):
+                print(read_file(mem) or "(memory file is empty)")
             else:
                 print("(no memory file yet)")
             continue
         if user_input == "/forget":
-            if os.path.exists(MEMORY_FILE):
-                os.remove(MEMORY_FILE)
+            mem = get_memory_file(args.project)
+            if os.path.exists(mem):
+                os.remove(mem)
                 print("Memory cleared.")
             else:
                 print("(no memory file to clear)")
