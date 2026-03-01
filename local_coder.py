@@ -101,8 +101,18 @@ def tool_read_file(args: dict) -> str:
 
 
 def tool_write_file(args: dict) -> str:
-    write_file(args["path"], args["content"])
-    return f"Wrote {args['path']}"
+    path = args["path"]
+    # Warn if an absolute path points outside the current working directory
+    if os.path.isabs(path):
+        cwd = os.getcwd()
+        real = os.path.realpath(path)
+        if not real.startswith(os.path.realpath(cwd)):
+            return (
+                f"ERROR: Absolute path '{path}' points outside the project directory '{cwd}'. "
+                f"Use a relative path (e.g. 'src/App.js') instead."
+            )
+    write_file(path, args["content"])
+    return f"Wrote {path}"
 
 
 def tool_list_files(args: dict) -> str:
@@ -223,15 +233,19 @@ Available tools:
 
 Rules:
 1. Never invent tool names.
-2. Always read a file before writing it (understand existing content).
-3. After every write_file you will receive a verification read automatically.
-4. Use npm_build after modifying React/JS/CSS files — do not use run_shell for npm.
-5. You CANNOT finish until at least one file has been modified (verified non-identical write).
-6. For React/npm projects: you ALSO cannot finish until npm_build returns BUILD SUCCESS after your last JS/JSX/CSS change.
-7. For Python/non-npm tasks: do NOT call npm_build. Just write files, run_shell to test, then finish.
-8. If the build fails, read the error lines carefully, fix the offending file(s), and build again.
-9. If you get a JSON parse error, your previous response was invalid — correct it and respond with valid JSON only.
-10. Use remember() to save important discoveries: file locations, patterns, gotchas, project conventions.
+2. FIRST ACTION must always be list_files('.') to see what already exists in the project.
+3. Always read a file before writing it (understand existing content).
+4. After every write_file you will receive a verification read automatically.
+5. Use npm_build after modifying React/JS/CSS files — do not use run_shell for npm.
+6. You CANNOT finish until at least one file has been modified (verified non-identical write).
+7. For React/npm projects: you ALSO cannot finish until npm_build returns BUILD SUCCESS after your last JS/JSX/CSS change.
+8. For Python/non-npm tasks: do NOT call npm_build. Just write files, run_shell to test, then finish.
+9. If the build fails, read the error lines carefully, fix the offending file(s), and build again.
+10. If you get a JSON parse error, your previous response was invalid — correct it and respond with valid JSON only.
+11. Use remember() to save important discoveries: file locations, patterns, gotchas, project conventions.
+12. ALWAYS use relative paths (e.g. 'src/App.js'). NEVER use absolute paths — write_file will reject them.
+13. If a function or import doesn't exist yet, write that file first before writing code that imports it.
+14. Tackle one concrete deliverable at a time. Get npm_build to pass before moving to the next feature.
 """
 
 
@@ -407,11 +421,20 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
             if json_fail_count >= JSON_RETRY_LIMIT:
                 print(f"\nAborted: {JSON_RETRY_LIMIT} consecutive JSON parse failures.")
                 return
-            error_msg = (
-                f"Your response was not valid JSON (failure {json_fail_count}/{JSON_RETRY_LIMIT}).\n"
-                f"Failed response (first 400 chars): {response[:400]}\n"
-                f"Respond with ONLY a valid JSON object matching the schema."
-            )
+            if json_fail_count >= 2:
+                # After 2 failures, wipe context and ask for a fresh, simpler approach
+                ctx.compact()
+                error_msg = (
+                    f"REPEATED JSON FAILURE. Your last {json_fail_count} responses were not valid JSON. "
+                    f"Stop trying the same approach. Take a step back: list_files('.') to see what exists, "
+                    f"then attempt ONE small, concrete action. Respond with ONLY a single valid JSON object."
+                )
+            else:
+                error_msg = (
+                    f"Your response was not valid JSON (failure {json_fail_count}/{JSON_RETRY_LIMIT}).\n"
+                    f"Failed response (first 200 chars): {response[:200]}\n"
+                    f"Respond with ONLY a valid JSON object matching the schema. No markdown, no prose."
+                )
             ctx.add("system", error_msg)
             continue
         json_fail_count = 0  # reset on success
