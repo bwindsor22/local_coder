@@ -32,6 +32,9 @@ JSON_RETRY_LIMIT = 4   # max consecutive invalid-JSON responses before aborting
 # Path to the shared Python tools
 TOOLS_DIR = "/Users/brad/projects/code/game-creation-agent/tools"
 
+# Long-term memory file (persists across sessions)
+MEMORY_FILE = os.path.expanduser("~/.local_coder_memory.md")
+
 
 # ============================================================
 # Utility
@@ -163,6 +166,16 @@ def tool_npm_build(args: dict) -> str:
         return "BUILD FAILED\n" + filter_build_output(combined)
 
 
+def tool_remember(args: dict) -> str:
+    """Append a fact to the long-term memory file (~/.local_coder_memory.md)."""
+    text = args.get("text", "").strip()
+    if not text:
+        return "ERROR: 'text' argument required"
+    with open(MEMORY_FILE, "a", encoding="utf-8") as f:
+        f.write(f"- {text}\n")
+    return f"Saved to memory: {text}"
+
+
 def tool_git(args: dict) -> str:
     """Run safe read-only or staging git commands."""
     subcmd = args.get("subcommand", "status")
@@ -185,6 +198,7 @@ TOOLS = {
     "search_files": tool_search_files,
     "npm_build":    tool_npm_build,
     "git":          tool_git,
+    "remember":     tool_remember,
 }
 
 TOOL_SCHEMA = """You must respond ONLY in valid JSON. No markdown, no prose outside the JSON.
@@ -204,6 +218,8 @@ Available tools:
 - run_shell(command, cwd?)                  — run a shell command
 - search_files(pattern, path?, include?)    — grep for a pattern in files
 - npm_build(path)                           — build a React/npm project; returns BUILD SUCCESS or BUILD FAILED + errors
+- git(subcommand, cwd?, args?)              — run git status/diff/log/add/commit
+- remember(text)                            — save a fact to long-term memory for future sessions
 
 Rules:
 1. Never invent tool names.
@@ -214,7 +230,8 @@ Rules:
 6. For React/npm projects: you ALSO cannot finish until npm_build returns BUILD SUCCESS after your last JS/JSX/CSS change.
 7. For Python/non-npm tasks: do NOT call npm_build. Just write files, run_shell to test, then finish.
 8. If the build fails, read the error lines carefully, fix the offending file(s), and build again.
-7. If you get a JSON parse error, your previous response was invalid — correct it and respond with valid JSON only.
+9. If you get a JSON parse error, your previous response was invalid — correct it and respond with valid JSON only.
+10. Use remember() to save important discoveries: file locations, patterns, gotchas, project conventions.
 """
 
 
@@ -313,7 +330,7 @@ Conversation:
 
         if not parsed:
             print("Compaction failed (invalid JSON). Trimming oldest messages instead.")
-            # Keep system messages + last 10 exchanges
+            # Keep system messages + last 20 exchanges
             system_msgs = [m for m in self.messages if m.startswith("SYSTEM:")]
             other_msgs = [m for m in self.messages if not m.startswith("SYSTEM:")]
             self.messages = system_msgs + other_msgs[-20:]
@@ -327,6 +344,8 @@ Build status: {parsed.get('build_status', 'unknown')}
 Current goal: {parsed.get('current_goal', '')}
 === END SUMMARY ===
 """
+        # Reload persistent context so memory/CLAUDE.md survive compaction
+        load_system_context(self, getattr(self, "_project_dir", None))
         self.add("system", summary_text)
         self.add("system", TOOL_SCHEMA)
 
@@ -335,15 +354,24 @@ Current goal: {parsed.get('current_goal', '')}
 # Agent Loop
 # ============================================================
 
-def run_agent(user_input: str, project_dir: Optional[str] = None):
-    ctx = Context()
+def load_system_context(ctx: "Context", project_dir: Optional[str]):
+    """Load persistent context: long-term memory and project CLAUDE.md."""
+    if os.path.exists(MEMORY_FILE):
+        memory = read_file(MEMORY_FILE).strip()
+        if memory:
+            ctx.add("system", f"Long-term memory (facts from previous sessions):\n{memory}")
 
-    # Load project CLAUDE.md if it exists
     if project_dir:
         claude_md = os.path.join(project_dir, "CLAUDE.md")
         if os.path.exists(claude_md):
             ctx.add("system", f"Project instructions (CLAUDE.md):\n{read_file(claude_md)}")
 
+
+def run_agent(user_input: str, project_dir: Optional[str] = None):
+    ctx = Context()
+    ctx._project_dir = project_dir  # store for compact() to reload
+
+    load_system_context(ctx, project_dir)
     ctx.add("system", TOOL_SCHEMA)
     ctx.add("user", user_input)
 
@@ -509,8 +537,21 @@ def main():
         if user_input == "/exit":
             break
         if user_input == "/help":
-            print("Commands: /exit  /help")
+            print("Commands: /exit  /help  /memory  /forget")
             print("Or enter a coding task and the agent will work on it.")
+            continue
+        if user_input == "/memory":
+            if os.path.exists(MEMORY_FILE):
+                print(read_file(MEMORY_FILE) or "(memory file is empty)")
+            else:
+                print("(no memory file yet)")
+            continue
+        if user_input == "/forget":
+            if os.path.exists(MEMORY_FILE):
+                os.remove(MEMORY_FILE)
+                print("Memory cleared.")
+            else:
+                print("(no memory file to clear)")
             continue
 
         run_agent(user_input, project_dir=args.project)
