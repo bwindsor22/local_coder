@@ -371,6 +371,10 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
     ctx = Context()
     ctx._project_dir = project_dir  # store for compact() to reload
 
+    # Change to project directory so relative file paths work correctly
+    if project_dir:
+        os.chdir(project_dir)
+
     load_system_context(ctx, project_dir)
     ctx.add("system", TOOL_SCHEMA)
     ctx.add("user", user_input)
