@@ -176,76 +176,6 @@ def tool_remember(args: dict) -> str:
     return f"Saved to memory: {text}"
 
 
-def tool_read_pdf(args: dict) -> str:
-    """Extract text from a PDF file. Optional pages param like '1-5' or '3'."""
-    path = args.get("path")
-    pages = args.get("pages")
-    if not path:
-        return "ERROR: path required"
-    sys.path.insert(0, TOOLS_DIR)
-    try:
-        from pdf_tool import pdf_to_text  # type: ignore
-        text = pdf_to_text(path, pages=pages)
-        return text[:8000]  # cap to avoid context overflow
-    except ImportError:
-        return "ERROR: pdf_tool not available. Check TOOLS_DIR."
-    except Exception as e:
-        return f"read_pdf error: {e}"
-
-
-def tool_dev_server(args: dict) -> str:
-    """Start or stop a React dev server using game-creation-agent tools."""
-    action = args.get("action", "start")  # "start" or "stop"
-    port = int(args.get("port", 3000))
-    sys.path.insert(0, TOOLS_DIR)
-    try:
-        from dev_tools import start_dev_server, kill_dev_server  # type: ignore
-        if action == "stop":
-            kill_dev_server(port)
-            return f"Dev server on port {port} stopped."
-        path = args.get("path", ".")
-        kill_dev_server(port)
-        result = start_dev_server(path, port)
-        import time; time.sleep(4)  # wait for server to be ready
-        return f"Dev server started at http://localhost:{port} (pid={result.get('pid')})"
-    except ImportError:
-        return "ERROR: dev_tools not available. Check TOOLS_DIR."
-    except Exception as e:
-        return f"dev_server error: {e}"
-
-
-def tool_screenshot(args: dict) -> str:
-    """Take a screenshot of a URL and return the image path."""
-    url = args.get("url", "http://localhost:3000")
-    output_path = args.get("output_path", "/tmp/screenshot.png")
-    selector = args.get("selector")  # optional CSS selector for element screenshot
-    sys.path.insert(0, TOOLS_DIR)
-    try:
-        from screenshot_tool import take_screenshot  # type: ignore
-        path = take_screenshot(url, selector=selector, output_path=output_path)
-        return f"Screenshot saved to {path}"
-    except ImportError:
-        return "ERROR: screenshot_tool not available."
-    except Exception as e:
-        return f"screenshot error: {e}"
-
-
-def tool_ask_vision(args: dict) -> str:
-    """Analyze a screenshot image with Claude vision. Returns Claude's answer."""
-    image_path = args.get("image_path")
-    question = args.get("question", "Describe what you see.")
-    if not image_path:
-        return "ERROR: image_path required"
-    sys.path.insert(0, TOOLS_DIR)
-    try:
-        from vision_tool import ask_about_screenshot  # type: ignore
-        return ask_about_screenshot(image_path, question)
-    except ImportError:
-        return "ERROR: vision_tool not available."
-    except Exception as e:
-        return f"vision error: {e}"
-
-
 def tool_git(args: dict) -> str:
     """Run safe read-only or staging git commands."""
     subcmd = args.get("subcommand", "status")
@@ -267,10 +197,6 @@ TOOLS = {
     "run_shell":    tool_run_shell,
     "search_files": tool_search_files,
     "npm_build":    tool_npm_build,
-    "dev_server":   tool_dev_server,
-    "screenshot":   tool_screenshot,
-    "ask_vision":   tool_ask_vision,
-    "read_pdf":     tool_read_pdf,
     "git":          tool_git,
     "remember":     tool_remember,
 }
@@ -292,10 +218,6 @@ Available tools:
 - run_shell(command, cwd?)                  — run a shell command
 - search_files(pattern, path?, include?)    — grep for a pattern in files
 - npm_build(path)                           — build a React/npm project; returns BUILD SUCCESS or BUILD FAILED + errors
-- dev_server(action, path?, port?)          — start or stop a React dev server (action: "start"|"stop")
-- screenshot(url?, output_path?, selector?) — take a screenshot of a running web app; returns image path
-- ask_vision(image_path, question)          — ask Claude to analyze a screenshot; returns text answer
-- read_pdf(path, pages?)                    — extract text from a PDF file (pages: "1-5" or "3")
 - git(subcommand, cwd?, args?)              — run git status/diff/log/add/commit
 - remember(text)                            — save a fact to long-term memory for future sessions
 
@@ -310,8 +232,6 @@ Rules:
 8. If the build fails, read the error lines carefully, fix the offending file(s), and build again.
 9. If you get a JSON parse error, your previous response was invalid — correct it and respond with valid JSON only.
 10. Use remember() to save important discoveries: file locations, patterns, gotchas, project conventions.
-11. To visually verify React changes: dev_server(start, path, port) → screenshot(url) → ask_vision(image_path, question). Always stop the dev server when done.
-12. The ask_vision tool uses Claude claude-sonnet-4-6 with vision — use it to confirm UI elements are visible and correct after build.
 """
 
 
