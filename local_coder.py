@@ -128,12 +128,18 @@ def tool_list_files(args: dict) -> str:
 def tool_run_shell(args: dict) -> str:
     command = args["command"]
     cwd = args.get("cwd")
+    # Extend PATH to include common binary locations (homebrew, local)
+    env = {
+        **os.environ,
+        "PATH": f"/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}",
+    }
     result = subprocess.run(
         command,
         shell=True,
         capture_output=True,
         text=True,
         cwd=cwd,
+        env=env,
     )
     out = f"Return code: {result.returncode}\n"
     if result.stdout:
