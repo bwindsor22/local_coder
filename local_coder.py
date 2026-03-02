@@ -207,6 +207,60 @@ def tool_git(args: dict) -> str:
     return out[:3000] or "(empty output)"
 
 
+def tool_edit_file(args: dict) -> str:
+    """Replace old_str with new_str in a file (targeted patch, not full rewrite)."""
+    path = args["path"]
+    old_str = args["old_str"]
+    new_str = args["new_str"]
+    replace_all = args.get("replace_all", False)
+
+    if os.path.isabs(path):
+        cwd = os.getcwd()
+        real = os.path.realpath(path)
+        if not real.startswith(os.path.realpath(cwd)):
+            return (
+                f"ERROR: Absolute path '{path}' points outside the project directory '{cwd}'. "
+                f"Use a relative path instead."
+            )
+    try:
+        content = read_file(path)
+    except FileNotFoundError:
+        return f"ERROR: File not found: {path}"
+
+    if old_str not in content:
+        # Give a helpful hint: show lines nearby matching the first few words
+        first_words = old_str.strip()[:40]
+        return (
+            f"ERROR: old_str not found verbatim in {path}. "
+            f"First 40 chars searched: {repr(first_words)}. "
+            f"Read the file first to copy the exact text to replace."
+        )
+
+    count = content.count(old_str)
+    if not replace_all and count > 1:
+        return (
+            f"ERROR: old_str appears {count} times in {path}. "
+            f"Add more surrounding context to make it unique, or set replace_all=true."
+        )
+
+    new_content = content.replace(old_str, new_str) if replace_all else content.replace(old_str, new_str, 1)
+    write_file(path, new_content)
+    replaced = "all occurrences" if replace_all else "1 occurrence"
+    return f"Edited {path}: replaced {replaced}."
+
+
+def tool_glob(args: dict) -> str:
+    """Find files matching a glob pattern (e.g. 'src/**/*.jsx')."""
+    import glob as glob_module
+    pattern = args["pattern"]
+    base = args.get("base", ".")
+    full_pattern = os.path.join(base, pattern) if not os.path.isabs(pattern) else pattern
+    matches = sorted(glob_module.glob(full_pattern, recursive=True))
+    noise = {'node_modules', '.git', '__pycache__', 'build', 'dist', '.next', 'venv', 'env'}
+    filtered = [m for m in matches if not any(n in m.split(os.sep) for n in noise)]
+    return "\n".join(filtered) or "(no matches)"
+
+
 def tool_read_pdf(args: dict) -> str:
     """Extract text from a PDF rulebook. pages: '1-5' or '3' (optional)."""
     path = args.get("path")
@@ -233,6 +287,8 @@ TOOLS = {
     "list_files":   tool_list_files,
     "run_shell":    tool_run_shell,
     "search_files": tool_search_files,
+    "edit_file":    tool_edit_file,
+    "glob":         tool_glob,
     "npm_build":    tool_npm_build,
     "git":          tool_git,
     "read_pdf":     tool_read_pdf,
@@ -251,8 +307,10 @@ Schema:
 
 Available tools:
 - read_file(path, offset?, limit?)          — read a file (optional line range)
-- write_file(path, content)                 — create or overwrite a file
-- list_files(path)                          — list files recursively (skips node_modules etc.)
+- edit_file(path, old_str, new_str, replace_all?) — patch a file: replace old_str with new_str
+- write_file(path, content)                 — create or fully overwrite a file (use only for new files or complete rewrites)
+- glob(pattern, base?)                      — find files by glob pattern (e.g. 'src/**/*.jsx')
+- list_files(path)                          — list all files recursively (skips node_modules etc.)
 - run_shell(command, cwd?)                  — run a shell command
 - search_files(pattern, path?, include?)    — grep for a pattern in files
 - npm_build(path)                           — build a React/npm project; returns BUILD SUCCESS or BUILD FAILED + errors
@@ -263,18 +321,20 @@ Available tools:
 Rules:
 1. Never invent tool names.
 2. FIRST ACTION must always be list_files('.') to see what already exists in the project.
-3. Always read a file before writing it (understand existing content).
-4. After every write_file you will receive a verification read automatically.
-5. Use npm_build after modifying React/JS/CSS files — do not use run_shell for npm.
-6. You CANNOT finish until at least one file has been modified (verified non-identical write).
-7. For React/npm projects: you ALSO cannot finish until npm_build returns BUILD SUCCESS after your last JS/JSX/CSS change.
-8. For Python/non-npm tasks: do NOT call npm_build. Just write files, run_shell to test, then finish.
-9. If the build fails, read the error lines carefully, fix the offending file(s), and build again.
-10. If you get a JSON parse error, your previous response was invalid — correct it and respond with valid JSON only.
-11. Use remember() to save important discoveries: file locations, patterns, gotchas, project conventions.
-12. ALWAYS use relative paths (e.g. 'src/App.js'). NEVER use absolute paths — write_file will reject them.
-13. If a function or import doesn't exist yet, write that file first before writing code that imports it.
-14. Tackle one concrete deliverable at a time. Get npm_build to pass before moving to the next feature.
+3. Always read a file before modifying it (understand existing content).
+4. PREFER edit_file over write_file for changes to existing files — it's safer and uses less context.
+5. Use write_file only when creating a new file or completely rewriting an existing one.
+6. After every write_file you will receive a verification read automatically.
+7. Use npm_build after modifying React/JS/CSS files — do not use run_shell for npm.
+8. You CANNOT finish until at least one file has been modified (verified non-identical write).
+9. For React/npm projects: you ALSO cannot finish until npm_build returns BUILD SUCCESS after your last JS/JSX/CSS change.
+10. For Python/non-npm tasks: do NOT call npm_build. Just write files, run_shell to test, then finish.
+11. If the build fails, read the error lines carefully, fix the offending file(s), and build again.
+12. If you get a JSON parse error, your previous response was invalid — correct it and respond with valid JSON only.
+13. Use remember() to save important discoveries: file locations, patterns, gotchas, project conventions.
+14. ALWAYS use relative paths (e.g. 'src/App.js'). NEVER use absolute paths — write_file/edit_file will reject them.
+15. If a function or import doesn't exist yet, write that file first before writing code that imports it.
+16. Tackle one concrete deliverable at a time. Get npm_build to pass before moving to the next feature.
 """
 
 
@@ -498,8 +558,8 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
             ctx.add("system", f"Unknown action '{action}'. Valid actions: {list(TOOLS.keys())} or 'finish'.")
             continue
 
-        # ── Write file (with before/after verification) ──────────────────
-        if action == "write_file":
+        # ── Write / edit file (with before/after verification) ──────────────────
+        if action in ("write_file", "edit_file"):
             path = arguments.get("path", "")
             try:
                 before = read_file(path)
@@ -509,7 +569,14 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
             try:
                 result = TOOLS[action](arguments)
             except Exception as e:
-                ctx.add("system", f"write_file failed: {e}")
+                ctx.add("system", f"{action} failed: {e}")
+                continue
+
+            # If edit_file returned an ERROR string, surface it without verifying
+            if action == "edit_file" and isinstance(result, str) and result.startswith("ERROR"):
+                ctx.add("assistant", response)
+                ctx.add("system", result)
+                print(f"\n✗ {action} error: {result[:120]}")
                 continue
 
             try:
@@ -531,8 +598,8 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
 
             ctx.add("assistant", response)
             ctx.add("tool", result)
-            ctx.add("tool", f"Verification — file after write (first 60 lines):\n" + "\n".join(after.splitlines()[:60]))
-            print(f"\n✓ wrote {path}")
+            ctx.add("tool", f"Verification — file after {action} (first 60 lines):\n" + "\n".join(after.splitlines()[:60]))
+            print(f"\n✓ {action} {path}")
             continue
 
         # ── npm_build ─────────────────────────────────────────────────────
