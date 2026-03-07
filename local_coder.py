@@ -259,12 +259,20 @@ def tool_edit_file(args: dict) -> str:
         return f"ERROR: File not found: {path}"
 
     if old_str not in content:
-        # Give a helpful hint: show lines nearby matching the first few words
-        first_words = old_str.strip()[:40]
+        # Find nearby lines to help model self-correct
+        first_line = old_str.strip().split('\n')[0][:30]
+        simple = re.sub(r'[^a-zA-Z0-9 ]', '', first_line).lower()
+        hint_lines = []
+        lines = content.splitlines()
+        for i, line in enumerate(lines):
+            if simple and re.sub(r'[^a-zA-Z0-9 ]', '', line).lower().find(simple) >= 0:
+                hint_lines = lines[max(0, i-1):i+3]
+                break
+        hint = ('\nNearest matching lines:\n' + '\n'.join(hint_lines)) if hint_lines else ''
         return (
             f"ERROR: old_str not found verbatim in {path}. "
-            f"First 40 chars searched: {repr(first_words)}. "
-            f"Read the file first to copy the exact text to replace."
+            f"Unicode characters like em-dash (—) differ from hyphen (-) — they must match exactly. "
+            f"Call read_file('{path}') to get exact text, then copy it precisely.{hint}"
         )
 
     count = content.count(old_str)
@@ -613,7 +621,11 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
         # ── Finish guard ────────────────────────────────────────────────────
         if action == "finish":
             if not last_write_changed:
-                ctx.add("system", "Cannot finish: no verified file change has been made yet. Make a change first.")
+                ctx.add("system",
+                    "Cannot finish: no verified file change has been made yet. "
+                    "Verifying a build or reading files does NOT count. "
+                    "Your edit_file/write_file calls have either not been attempted or returned an ERROR. "
+                    "Re-read the target file, copy the EXACT text to replace (including Unicode chars), and call edit_file again.")
                 continue
             if is_npm_project and needs_build and not build_passed:
                 ctx.add("system", "Cannot finish: JS/JSX/CSS files were modified but npm_build has not returned BUILD SUCCESS. Run npm_build.")
