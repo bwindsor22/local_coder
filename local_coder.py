@@ -128,24 +128,30 @@ def tool_list_files(args: dict) -> str:
 def tool_run_shell(args: dict) -> str:
     command = args["command"]
     cwd = args.get("cwd")
+    timeout_seconds = int(args.get("timeout_seconds", 60))
+    timeout_seconds = min(timeout_seconds, 600)  # cap at 10 minutes
     # Extend PATH to include common binary locations (homebrew, local)
     env = {
         **os.environ,
         "PATH": f"/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}",
     }
-    result = subprocess.run(
-        command,
-        shell=True,
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            env=env,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return f"TIMEOUT: command exceeded {timeout_seconds}s. For long-running processes use 'command &' to run in background."
     out = f"Return code: {result.returncode}\n"
     if result.stdout:
-        out += f"STDOUT:\n{result.stdout}\n"
+        out += f"STDOUT:\n{result.stdout[:3000]}\n"
     if result.stderr:
-        out += f"STDERR:\n{result.stderr}\n"
+        out += f"STDERR:\n{result.stderr[:1000]}\n"
     return out
 
 
@@ -337,9 +343,9 @@ Available tools:
 - write_file(path, content)                 — create or fully overwrite a file (use only for new files or complete rewrites)
 - glob(pattern, base?)                      — find files by glob pattern (e.g. 'src/**/*.jsx')
 - list_files(path)                          — list all files recursively (skips node_modules etc.)
-- run_shell(command, cwd?)                  — run a shell command
+- run_shell(command, cwd?, timeout_seconds?) — run a shell command (default 60s timeout; use 'cmd &' for background)
 - search_files(pattern, path?, include?)    — grep for a pattern in files
-- npm_build(path)                           — build a React/npm project; returns BUILD SUCCESS or BUILD FAILED + errors
+- npm_build(path)                           — build a React/npm project; returns BUILD SUCCESS or BUILD FAILED + errors. ALWAYS pass path="." to build the current project.
 - git(subcommand, cwd?, args?)              — run git status/diff/log/add/commit
 - read_pdf(path, pages?)                    — extract text from a PDF rulebook
 - remember(text)                            — save a fact to long-term memory for future sessions
@@ -347,15 +353,18 @@ Available tools:
 
 Rules:
 1. Never invent tool names.
-2. FIRST ACTION must always be list_files('.') to see what already exists in the project.
+2. FIRST ACTION must always be list_files('.') to see what already exists in the project. Do NOT skip this — even if you think you know the structure.
 3. Always read a file before modifying it (understand existing content).
 4. PREFER edit_file over write_file for changes to existing files — it's safer and uses less context.
 5. Use write_file only when creating a new file or completely rewriting an existing one.
 6. After every write_file you will receive a verification read automatically.
-7. Use npm_build after modifying React/JS/CSS files — do not use run_shell for npm.
-8. You CANNOT finish until at least one file has been modified (verified non-identical write).
+7. Use npm_build(path=".") after modifying React/JS/CSS files — always pass "." to build the current project. NEVER use an absolute path like "/Users/brad/..." for npm_build.
+8. You CANNOT finish until at least one file has been modified (verified non-identical write). Verifying a build or reading files does NOT count as completing the task.
 9. For React/npm projects: you ALSO cannot finish until npm_build returns BUILD SUCCESS after your last JS/JSX/CSS change.
 10. For Python/non-npm tasks: do NOT call npm_build. Just write files, run_shell to test, then finish.
+10b. For Node.js scripts that are NOT React components (e.g. trainer scripts, CLI tools): do NOT call npm_build. Use run_shell to test ('node script.js' or 'node script.js &' for background).
+10c. For long-running commands (training, dev servers): append '&' to run in background. run_shell will return immediately.
+10d. Do not wait for training runs to complete — start them in background, then finish the task.
 11. If the build fails, read the error lines carefully, fix the offending file(s), and build again.
 12. If you get a JSON parse error, your previous response was invalid — correct it and respond with valid JSON only.
 13. Use remember() to save important discoveries: file locations, patterns, gotchas, project conventions.
@@ -498,6 +507,10 @@ Current goal: {parsed.get('current_goal', '')}
 """
         # Reload persistent context so memory/CLAUDE.md survive compaction
         load_system_context(self, getattr(self, "_project_dir", None))
+        # Always pin the original task so the model can't drift after compaction
+        original_task = getattr(self, "_original_task", None)
+        if original_task:
+            self.add("system", f"PINNED TASK — your ONLY goal, do not deviate:\n{original_task}")
         self.add("system", summary_text)
         self.add("system", TOOL_SCHEMA)
 
@@ -529,6 +542,7 @@ def load_system_context(ctx: "Context", project_dir: Optional[str]):
 def run_agent(user_input: str, project_dir: Optional[str] = None):
     ctx = Context()
     ctx._project_dir = project_dir  # store for compact() to reload
+    ctx._original_task = user_input  # pinned so it survives compaction
 
     # Change to project directory so relative file paths work correctly
     if project_dir:
@@ -645,10 +659,17 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
                 continue
 
             last_write_changed = True
-            # Only require a rebuild for JS/JSX/CSS/TS files in an npm project
-            if is_npm_project and any(path.endswith(ext) for ext in ('.js', '.jsx', '.ts', '.tsx', '.css')):
+            # Only require a rebuild for React/browser JS files (not Node-only trainer scripts)
+            # Node.js scripts in src/AI/, scripts/, tools/ don't affect the React bundle
+            _is_react_file = (
+                is_npm_project and
+                any(path.endswith(ext) for ext in ('.jsx', '.tsx', '.css')) or
+                (any(path.endswith(ext) for ext in ('.js', '.ts')) and
+                 not any(seg in path for seg in ('AI/', 'ai/', 'scripts/', 'tools/', 'trainer')))
+            )
+            if _is_react_file:
                 needs_build = True
-                build_passed = False  # must rebuild after any JS/CSS change
+                build_passed = False  # must rebuild after any React JS/CSS change
 
             ctx.add("assistant", response)
             ctx.add("tool", result)
