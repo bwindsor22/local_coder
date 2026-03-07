@@ -673,8 +673,7 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
             last_write_changed = True
             # Only require a rebuild for React/browser JS files (not Node-only trainer scripts)
             # Node.js scripts in src/AI/, scripts/, tools/ don't affect the React bundle
-            _is_react_file = (
-                is_npm_project and
+            _is_react_file = is_npm_project and (
                 any(path.endswith(ext) for ext in ('.jsx', '.tsx', '.css')) or
                 (any(path.endswith(ext) for ext in ('.js', '.ts')) and
                  not any(seg in path for seg in ('AI/', 'ai/', 'scripts/', 'tools/', 'trainer')))
