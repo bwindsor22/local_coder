@@ -122,7 +122,7 @@ def tool_write_file(args: dict) -> str:
 
 
 def tool_list_files(args: dict) -> str:
-    return "\n".join(list_files_recursive(args["path"]))
+    return "\n".join(list_files_recursive(args.get("path", ".")))
 
 
 def tool_run_shell(args: dict) -> str:
@@ -197,6 +197,25 @@ def tool_remember(args: dict) -> str:
     with open(mem_file, "a", encoding="utf-8") as f:
         f.write(f"- {text}\n")
     return f"Saved to memory ({mem_file}): {text}"
+
+
+def tool_screenshot(args: dict) -> str:
+    """Take a screenshot of a URL and return a visual description via vision_tool."""
+    url = args.get("url", "http://localhost:3000")
+    script = (
+        f"import sys; sys.path.insert(0, {repr(TOOLS_DIR)}); "
+        f"from screenshot_tool import take_screenshot; "
+        f"from vision_tool import ask_about_screenshot; "
+        f"path = take_screenshot({repr(url)}, output_path='/tmp/lc_screenshot.png'); "
+        f"print(ask_about_screenshot(path, 'Describe what you see on the page. Note any visible UI elements, text, errors, or layout issues.'))"
+    )
+    result = subprocess.run(
+        ["/usr/bin/python3", "-c", script],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        return f"screenshot error: {result.stderr[:400]}"
+    return result.stdout.strip()
 
 
 def tool_git(args: dict) -> str:
@@ -299,6 +318,7 @@ TOOLS = {
     "git":          tool_git,
     "read_pdf":     tool_read_pdf,
     "remember":     tool_remember,
+    "screenshot":   tool_screenshot,
 }
 
 TOOL_SCHEMA = """You must respond ONLY in valid JSON. No markdown, no prose outside the JSON.
@@ -323,6 +343,7 @@ Available tools:
 - git(subcommand, cwd?, args?)              — run git status/diff/log/add/commit
 - read_pdf(path, pages?)                    — extract text from a PDF rulebook
 - remember(text)                            — save a fact to long-term memory for future sessions
+- screenshot(url)                           — take a screenshot of a URL and return a visual description
 
 Rules:
 1. Never invent tool names.
@@ -339,6 +360,7 @@ Rules:
 12. If you get a JSON parse error, your previous response was invalid — correct it and respond with valid JSON only.
 13. Use remember() to save important discoveries: file locations, patterns, gotchas, project conventions.
 14. ALWAYS use relative paths (e.g. 'src/App.js'). NEVER use absolute paths — write_file/edit_file will reject them.
+17. If the task references specific files that don't exist, immediately call list_files('.') and report which files are missing BEFORE attempting any implementation. Do not silently invent an alternative approach.
 15. If a function or import doesn't exist yet, write that file first before writing code that imports it.
 16. Tackle one concrete deliverable at a time. Get npm_build to pass before moving to the next feature.
 """
@@ -378,12 +400,33 @@ def extract_json(text: str) -> str:
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
-    # Find outermost { }
+    # Find the first complete JSON object using balanced brace counting.
+    # rfind("}") would fail when the model echoes the object twice in one reply.
     start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
+    if start == -1:
         raise ValueError("No JSON object found in response")
-    return text[start:end + 1]
+    depth = 0
+    in_string = False
+    escape = False
+    for i, ch in enumerate(text[start:], start):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    raise ValueError("Unbalanced braces — no complete JSON object found")
 
 
 def safe_parse(response: str) -> Optional[dict]:
@@ -506,9 +549,11 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
     )
 
     for step in range(MAX_STEPS):
+        compacted_this_step = False
         prompt = ctx.build_prompt()
         if len(prompt) > MAX_CONTEXT_CHARS:
             ctx.compact()
+            compacted_this_step = True
             prompt = ctx.build_prompt()
 
         print(f"\n[Step {step + 1}/{MAX_STEPS}]")
@@ -524,8 +569,11 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
                 print(f"\nAborted: {JSON_RETRY_LIMIT} consecutive JSON parse failures.")
                 return
             if json_fail_count >= 2:
-                # After 2 failures, wipe context and ask for a fresh, simpler approach
-                ctx.compact()
+                # After 2 failures, wipe context and ask for a fresh, simpler approach.
+                # Skip if we already compacted this step to avoid double-compaction.
+                if not compacted_this_step:
+                    ctx.compact()
+                    compacted_this_step = True  # noqa: F841
                 error_msg = (
                     f"REPEATED JSON FAILURE. Your last {json_fail_count} responses were not valid JSON. "
                     f"Stop trying the same approach. Take a step back: list_files('.') to see what exists, "
