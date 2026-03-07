@@ -547,16 +547,75 @@ def load_system_context(ctx: "Context", project_dir: Optional[str]):
                 ctx.add("system", f"Long-term memory:\n{memory}")
 
 
-def run_agent(user_input: str, project_dir: Optional[str] = None):
+def make_plan(user_input: str, project_dir: Optional[str]) -> str:
+    """
+    Ask the model to produce a numbered step-by-step plan before execution.
+    Returns the plan string (injected as pinned system context).
+    """
+    ctx = Context()
+    load_system_context(ctx, project_dir)
+    ctx.add("user", (
+        f"You are about to work on this task:\n\n{user_input}\n\n"
+        "Before writing any code, output ONLY a numbered plan (5-10 steps) of exactly what files "
+        "you will read, what changes you will make, and how you will verify the result. "
+        "Be specific about file names and what text to find/replace. "
+        "No JSON — plain text list only."
+    ))
+    response = call_llm(ctx.build_prompt())
+    # Strip any JSON wrapper if model slips into it
+    plan = response.strip()
+    if plan.startswith("{"):
+        plan = "(plan generation failed — proceeding without plan)"
+    return plan
+
+
+def self_assess(task: str, modified_files: list, ctx_snapshot: str) -> str:
+    """
+    Ask the model to score its own work on three dimensions before finishing.
+    Returns an assessment dict string: {"score": int, "issues": [...], "verdict": "pass|retry"}.
+    Score 0-10. If score < 7 or verdict=="retry", the agent loop should continue.
+    """
+    prompt = (
+        f"You just attempted this task:\n{task}\n\n"
+        f"Files modified: {modified_files}\n\n"
+        f"Conversation so far (last 3000 chars):\n{ctx_snapshot[-3000:]}\n\n"
+        "Rate the outcome on a scale 0-10 across:\n"
+        "  1. Correctness — does the code actually do what was asked?\n"
+        "  2. Completeness — are all parts of the task done?\n"
+        "  3. Build status — did the build pass?\n\n"
+        "Respond ONLY with valid JSON:\n"
+        '{"score": <0-10>, "issues": ["list any problems"], "verdict": "pass" or "retry"}\n'
+        "verdict=retry if score < 7 or there are unresolved issues."
+    )
+    response = call_llm(prompt)
+    parsed = safe_parse(response)
+    if not parsed:
+        return '{"score": 5, "issues": ["self-assessment parse failed"], "verdict": "pass"}'
+    return json.dumps(parsed)
+
+
+def run_agent(user_input: str, project_dir: Optional[str] = None, planning: bool = True, self_assessment: bool = True):
     ctx = Context()
     ctx._project_dir = project_dir  # store for compact() to reload
     ctx._original_task = user_input  # pinned so it survives compaction
+
+    # ── Planning phase ────────────────────────────────────────────────────────
+    if planning:
+        print_header("Planning phase")
+        plan = make_plan(user_input, project_dir)
+        print(plan)
+        ctx._plan = plan
+    else:
+        plan = None
 
     # Change to project directory so relative file paths work correctly
     if project_dir:
         os.chdir(project_dir)
 
     load_system_context(ctx, project_dir)
+    # Inject plan as pinned context so execution stays on track
+    if plan:
+        ctx.add("system", f"EXECUTION PLAN — follow these steps in order:\n{plan}")
     ctx.add("system", TOOL_SCHEMA)
     ctx.add("user", user_input)
 
@@ -564,6 +623,7 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
     build_passed = False        # True once npm_build returned BUILD SUCCESS
     json_fail_count = 0         # Consecutive JSON parse failures
     needs_build = False         # True after any JS/JSX/CSS write in an npm project
+    modified_files: list = []
 
     # Only enforce build for npm/React projects
     is_npm_project = bool(
@@ -630,6 +690,25 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
             if is_npm_project and needs_build and not build_passed:
                 ctx.add("system", "Cannot finish: JS/JSX/CSS files were modified but npm_build has not returned BUILD SUCCESS. Run npm_build.")
                 continue
+            # ── Self-assessment before completion ─────────────────────────
+            if self_assessment and modified_files:
+                print_header("Self-assessment")
+                assessment_str = self_assess(user_input, modified_files, ctx.build_prompt())
+                print(assessment_str)
+                assessment = safe_parse(assessment_str) or {}
+                score = assessment.get("score", 10)
+                verdict = assessment.get("verdict", "pass")
+                issues = assessment.get("issues", [])
+                if verdict == "retry" or score < 7:
+                    retry_msg = (
+                        f"Self-assessment score: {score}/10. Verdict: {verdict}. "
+                        f"Issues: {issues}. "
+                        "Do NOT finish yet — address the issues above, then try again."
+                    )
+                    ctx.add("system", retry_msg)
+                    continue
+                else:
+                    print(f"  Score {score}/10 — passing.")
             print_header("DONE")
             print(parsed.get("final_answer", "(no summary)"))
             return
@@ -671,6 +750,8 @@ def run_agent(user_input: str, project_dir: Optional[str] = None):
                 continue
 
             last_write_changed = True
+            if path not in modified_files:
+                modified_files.append(path)
             # Only require a rebuild for React/browser JS files (not Node-only trainer scripts)
             # Node.js scripts in src/AI/, scripts/, tools/ don't affect the React bundle
             _is_react_file = is_npm_project and (
@@ -733,10 +814,13 @@ def main():
     parser = argparse.ArgumentParser(description="Hardened local coding agent (Ollama)")
     parser.add_argument("--project", "-p", default=None, help="Project directory (loads CLAUDE.md if present)")
     parser.add_argument("--task", "-t", default=None, help="Run a single task non-interactively")
+    parser.add_argument("--no-plan", action="store_true", help="Skip planning phase")
+    parser.add_argument("--no-assess", action="store_true", help="Skip self-assessment before finish")
     args = parser.parse_args()
 
     if args.task:
-        run_agent(args.task, project_dir=args.project)
+        run_agent(args.task, project_dir=args.project,
+                  planning=not args.no_plan, self_assessment=not args.no_assess)
         return
 
     print_header("Local Coder — Hardened Agent")
